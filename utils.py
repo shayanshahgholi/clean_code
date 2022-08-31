@@ -1,111 +1,94 @@
 ## JSONIC: the decorator
 class jsonic(object):
-    
-    """ Relies on Python 2.7-ish string-encoding semantics; makes a whoooole lot
-        of assumptions about naming, additional installed, apps, you name it –
-        Also, it’s absolutely horrid. I hereby place it in the public domain.
-        
-        Usage example:
-        
-            class MyModel(models.Model):
-                
-                @jsonic(
-                    skip=[
-                        'categories', 'images', 'aximage_set', 'axflashmorsel_set',
-                        'tags', 'tagstring', 'color', 'colors', 'topsat', 'complement', 'inversecomplement',
-                    ], include=[
-                        'keyimage', 'flashmorsel',
-                    ],
-                )
-                def json(self, **kwargs):
-                    return kwargs.get('json', None)
-        
-        … would then allow, on an instance `my_model` of model class `MyModel`,
-          to call the method:
-        
-            >>> my_model.json()
-            (… gigantic Python – not JSON! – dictionary …)
-        
-        … which in an API view the dict, which would have keys and values from
-          the instance that vaguely corresponded to all the stuff in the decorator
-          params, would get encoded and stuck in a response.
-        
-        Actual production code written by me, circa 2008. Yep.
-    """
-    
-    def __init__(self, *decorargs, **deckeywords):
+    def __init__(self, **deckeywords):
         self.deckeywords = deckeywords
-    
+        self.dic = {}
+        self.key = None
+        self.thedic = None
+        self.recurse_limit = 2
+
     def __call__(self, fn):
-        def jsoner(obj, **kwargs):
-            dic = {}
-            key = None
-            thedic = None
-            recurse_limit = 2
-            thefields = obj._meta.get_all_field_names()
-            kwargs.update(self.deckeywords) # ??
-            
-            recurse = kwargs.get('recurse', 0)
-            incl = kwargs.get('include')
-            sk = kwargs.get('skip')
-            if incl:
-                if type(incl) == type([]):
-                    thefields.extend(incl)
-                else:
-                    thefields.append(incl)
-            if sk:
-                if type(sk) == type([]):
-                    for skipper in sk:
-                        if skipper in thefields:
-                            thefields.remove(skipper)
-                else:
-                    if sk in thefields:
-                        thefields.remove(sk)
-            
-            ## first vanilla fields
-            for f in thefields:
+        def include_handler(thefields, include):
+            if type(include) == type([]):
+                thefields.extend(include)
+            else:
+                thefields.append(include)
+
+        def skip_handler(thefields, skip):
+            if type(skip) == type([]):
+                for skipper in skip:
+                    if skipper in thefields:
+                        thefields.remove(skipper)
+            else:
+                if skip in thefields:
+                    thefields.remove(skip)
+
+        def get_thedic(obj, field):
+            try:
+                self.thedic = getattr(obj, "%s_set" % field)
+            except AttributeError:
                 try:
-                    thedic = getattr(obj, "%s_set" % f)
+                    self.thedic = getattr(obj, field)
                 except AttributeError:
-                    try:
-                        thedic = getattr(obj, f)
-                    except AttributeError: pass
-                    except ObjectDoesNotExist: pass
-                    else:
-                        key = str(f)
-                except ObjectDoesNotExist: pass
+                    pass
                 else:
-                    key = "%s_set" % f
-                
-                if key:
-                    if hasattr(thedic, "__class__") and hasattr(thedic, "all"):
-                        if callable(thedic.all):
-                            if hasattr(thedic.all(), "json"):
-                                if recurse < recurse_limit:
-                                    kwargs['recurse'] = recurse + 1
-                                    dic[key] = thedic.all().json(**kwargs)
-                    elif hasattr(thedic, "json"):
-                        if recurse < recurse_limit:
-                            kwargs['recurse'] = recurse + 1
-                            dic[key] = thedic.json(**kwargs)
+                    self.key = str(field)
+            except ObjectDoesNotExist:
+                pass
+            else:
+                self.key = "%s_set" % field
+
+        def key_handler(recurse, kwargs):
+            if (
+                hasattr(self.thedic, "__class__")
+                and hasattr(self.thedic, "all")
+                and callable(self.thedic.all)
+                and hasattr(self.thedic.all(), "json")
+            ):
+                if recurse < self.recurse_limit:
+                    kwargs["recurse"] = recurse + 1
+                    self.dic[self.key] = self.thedic.all().json(**kwargs)
+                elif hasattr(self.thedic, "json"):
+                    if recurse < self.recurse_limit:
+                        kwargs["recurse"] = recurse + 1
+                        self.dic[self.key] = self.thedic.json(**kwargs)
                     else:
                         try:
-                            theuni = thedic.__str__()
+                            theuni = self.thedic.__str__()
                         except UnicodeEncodeError:
-                            theuni = thedic.encode('utf-8')
-                        dic[key] = theuni
-            
-            ## now, do we have imagekit stuff in there?
-            if hasattr(obj, "_ik"):
-                if hasattr(obj, obj._ik.image_field):
-                    if hasattr(getattr(obj, obj._ik.image_field), 'size'):
-                        if getattr(obj, obj._ik.image_field):
-                            for ikaccessor in [getattr(obj, s.access_as) for s in obj._ik.specs]:
-                                key = ikaccessor.spec.access_as
-                                dic[key] = {
-                                    'url': ikaccessor.url,
-                                    'width': ikaccessor.width,
-                                    'height': ikaccessor.height,
-                                }
-            return fn(obj, json=dic, **kwargs)
+                            theuni = self.thedic.encode("utf-8")
+                            self.dic[self.key] = theuni
+
+        def check_imagekit(obj):
+            if (
+                hasattr(obj, "_ik")
+                and hasattr(obj, obj._ik.image_field)
+                and hasattr(getattr(obj, obj._ik.image_field), "size")
+                and getattr(obj, obj._ik.image_field)
+            ):
+                for ikaccessor in [getattr(obj, s.access_as) for s in obj._ik.specs]:
+                    key = ikaccessor.spec.access_as
+                    self.dic[key] = {
+                        "url": ikaccessor.url,
+                        "width": ikaccessor.width,
+                        "height": ikaccessor.height,
+                    }
+
+        def jsoner(obj, **kwargs):
+            thefields = obj._meta.get_all_field_names()
+            kwargs.update(self.deckeywords)
+            recurse = kwargs.get("recurse", 0)
+            include = kwargs.get("include")
+            skip = kwargs.get("skip")
+            if include:
+                include_handler(thefields, include)
+            if skip:
+                skip_handler(thefields, skip)
+            for field in thefields:
+                get_thedic(obj, field)
+                if self.key:
+                    key_handler(recurse)
+            check_imagekit(obj)
+            return fn(obj, json=self.dic, **kwargs)
+
         return jsoner
